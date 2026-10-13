@@ -745,6 +745,24 @@ or a red run deploys nothing. The `deploy to staging` job then:
    response. A previous container that is still answering does not count, and a container
    that never starts fails the job.
 
+**Fork production, by Promotion only.** Fork production is a second app on the same plan.
+Nothing is deployed to it on a push. A run of the workflow started by hand on the default
+branch is a Promotion:
+
+```sh
+gh workflow run architecture.yml --ref <default branch>
+```
+
+It reads the workflow's push runs on the default branch, newest first, and takes the first
+one whose `deploy to staging` job passed. It logs each newer run it skips, with the
+reason: that deploy failed, did not run because a check was red, or is still running.
+Then it deploys that run's image to Fork production, through the same action as staging,
+with the `production` GitHub Environment's own settings and secrets. It builds nothing,
+so Fork production only ever receives an image whose deploy to staging passed. It reads
+the runs and not the staging app: after a failed deploy, the app is still set to an image
+that never answered. With no green deploy in the newest 100 runs, it deploys nothing and
+fails.
+
 ### Processes
 
 `launch.sh` started two processes; the image starts both.
@@ -756,8 +774,10 @@ or a red run deploys nothing. The `deploy to staging` job then:
 
 ### Settings and secrets
 
-They live in the GitHub Environment `staging`, never in a committed file, and every deploy
-writes them to the app.
+They live in the GitHub Environments `staging` and `production`, never in a committed
+file, and every deploy writes them to the environment's app. Both hold the same names,
+each with its own values: its own app, and its own `DEV_LOGIN_KEY` and `SECRET_KEY`, so
+the two never share a session.
 
 | Kind | Name | What it is |
 |---|---|---|
