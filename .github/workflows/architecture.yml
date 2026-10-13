@@ -9,13 +9,23 @@
 # `architecture` and `test` jobs pass is built into one image, tagged with its
 # commit, and deployed to Fork staging, an App Service app whose settings and
 # secrets are held in the GitHub Environment `staging`.
+#
+# Fork production is deployed by Promotion only: a run of this workflow started
+# by hand (workflow_dispatch) on the default branch. It builds nothing. It
+# deploys the image of staging's last green deploy, so Fork production only
+# ever receives an image whose deploy to staging passed.
 name: Architecture
 
-on: [push, pull_request]
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
 
 jobs:
   architecture:
     name: architecture
+    # A Promotion builds nothing, so it has nothing to check.
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7.0.1
@@ -47,6 +57,7 @@ jobs:
   # AUTH_MODE=dev, so the run needs no .env, no secret and no network.
   test:
     name: test
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7.0.1
@@ -121,6 +132,90 @@ jobs:
         uses: ./.github/actions/deploy-to-app-service
         with:
           image: ${{ steps.image.outputs.image }}
+          resource-group: ${{ vars.AZURE_RESOURCE_GROUP }}
+          app-name: ${{ vars.AZURE_WEBAPP_NAME }}
+          dev-login-key: ${{ secrets.DEV_LOGIN_KEY }}
+          secret-key: ${{ secrets.SECRET_KEY }}
+          mistral-api-key: ${{ secrets.MISTRAL_API_KEY }}
+          default-provider-base-url: https://api.mistral.ai/v1
+
+  # The Promotion, first half: find the image of staging's last green deploy.
+  # It reads this workflow's own runs, not the staging app: a deploy sets the
+  # image before it waits for the app to answer, so after a failed deploy the
+  # app is still set to an image that never answered. Reading the runs needs
+  # no Azure login, only `actions: read`.
+  find-staging-image:
+    name: find staging's last green deploy
+    if: github.event_name == 'workflow_dispatch' && github.ref_name == github.event.repository.default_branch
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+    outputs:
+      image: ${{ steps.find.outputs.image }}
+    steps:
+      # The push runs on the default branch, newest first, and for each one the
+      # result of its `deploy to staging` job. The first run where that job
+      # passed built and deployed the image tagged with its commit: that image
+      # is promoted. Every newer run is skipped, and logged with the reason:
+      # the deploy failed, was skipped because a check was red, or is still
+      # running. With no such run in the newest 100, nothing is promoted.
+      # `deploy to staging` is the name of the job above: rename both together.
+      - name: Find the newest run whose deploy to staging passed
+        id: find
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          DEPLOY_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          gh run list --workflow architecture.yml --branch "$DEPLOY_BRANCH" --event push --limit 100 \
+            --json databaseId,headSha --jq '.[] | "\(.databaseId) \(.headSha)"' > runs.txt
+          while read -r run sha; do
+            [ -n "$run" ] || continue
+            result=$(gh run view "$run" --json jobs \
+              --jq '[.jobs[] | select(.name == "deploy to staging")][0] | if . == null then "did not run" elif .status != "completed" then .status else .conclusion end')
+            if [ "$result" = success ]; then
+              image="ghcr.io/${GITHUB_REPOSITORY,,}:$sha"
+              echo "Run $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$run, commit $sha: deploy to staging passed"
+              echo "Promoting $image"
+              echo "image=$image" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "Run $run, commit $sha: deploy to staging $result, skipped"
+          done < runs.txt
+          echo "No push run on $DEPLOY_BRANCH has a deploy to staging that passed: nothing to promote" >&2
+          exit 1
+
+  # The Promotion, second half: deploy that same image to Fork production, the
+  # way staging was deployed, with production's own app, settings and secrets.
+  # Nothing is built: there is no build step in this job.
+  promote-production:
+    name: promote to production
+    needs: find-staging-image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false
+    environment:
+      name: production
+      url: https://${{ vars.AZURE_WEBAPP_NAME }}.azurewebsites.net
+    steps:
+      # For the deploy action only: nothing is built from this checkout.
+      - uses: actions/checkout@v7.0.1
+
+      - name: Log in to Azure
+        uses: azure/login@v3.1.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Deploy that image to production
+        uses: ./.github/actions/deploy-to-app-service
+        with:
+          image: ${{ needs.find-staging-image.outputs.image }}
           resource-group: ${{ vars.AZURE_RESOURCE_GROUP }}
           app-name: ${{ vars.AZURE_WEBAPP_NAME }}
           dev-login-key: ${{ secrets.DEV_LOGIN_KEY }}
