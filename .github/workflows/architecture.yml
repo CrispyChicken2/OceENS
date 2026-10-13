@@ -36,3 +36,23 @@ jobs:
 
       - name: No import cycle between packages
         run: uv run python scripts/check_cycles.py
+
+  # The tests of tests/, on the same locked environment as the check above.
+  # conftest.py points the database at a temporary directory and sets
+  # AUTH_MODE=dev, so the run needs no .env, no secret and no network.
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.1.0
+        with:
+          enable-cache: true
+
+      - name: Install the project and its dev tools
+        run: uv sync --frozen
+
+      - name: Run the tests
+        run: uv run pytest
