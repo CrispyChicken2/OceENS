@@ -724,7 +724,9 @@ duplicates are refused.
 ## Deploying on Azure App Service
 
 This fork is deployed by `.github/workflows/architecture.yml` to **Fork staging**, an App
-Service app on a Basic B1 plan in France Central. The plan is always on, so the host has
+Service app on a Basic B1 plan in Belgium Central. The Course asks for France Central, but
+this subscription's "Allowed resource deployment regions" policy does not list it;
+Belgium Central is the closest region it allows. The plan is always on, so the host has
 no cold start. Fork staging holds generated data and no real user, so it signs in through
 the [dev sign-in](#dev-sign-in), guarded by its own `DEV_LOGIN_KEY`, and keeps SQLite.
 Those are the two exceptions to the checklist above, which describes EPF's production.
