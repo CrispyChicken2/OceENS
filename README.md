@@ -721,11 +721,78 @@ duplicates are refused.
 
 ---
 
+## Deploying on Azure App Service
+
+This fork is deployed by `.github/workflows/architecture.yml` to **Fork staging**, an App
+Service app on a Basic B1 plan in Belgium Central. The Course asks for France Central, but
+this subscription's "Allowed resource deployment regions" policy does not list it;
+Belgium Central is the closest region it allows. The plan is always on, so the host has
+no cold start. Fork staging holds generated data and no real user, so it signs in through
+the [dev sign-in](#dev-sign-in), guarded by its own `DEV_LOGIN_KEY`, and keeps SQLite.
+Those are the two exceptions to the checklist above, which describes EPF's production.
+
+**Deploy on green.** A push to the default branch is deployed only once the
+`architecture` and `test` jobs have passed on that commit. A pull request, another branch
+or a red run deploys nothing. The `deploy to staging` job then:
+
+1. builds one image for the commit, tags it with the commit and pushes it to GHCR
+   (`ghcr.io/<owner>/oceens:<commit>`, public, so App Service pulls it without
+   credentials). A commit whose image exists is not built again;
+2. writes the environment's settings to the app, then sets the app to that image
+   (`.github/actions/deploy-to-app-service`);
+3. waits until `/dev/login` answers `200` with that commit in its `X-Revision` header.
+   The image holds its commit as `REVISION`, and the application sends it back on every
+   response. A previous container that is still answering does not count, and a container
+   that never starts fails the job.
+
+### Processes
+
+`launch.sh` started two processes; the image starts both.
+
+| Process | Started by `launch.sh` as | Started in the image by |
+|---|---|---|
+| Web server | `uv run oceens` | the image's `CMD ["oceens"]` |
+| Summaries daemon | `uv run oceens-summaries` | the web server at startup, because the deploy sets `RUN_SUMMARIES_DAEMON=1` (`_maybe_start_summaries_daemon` in `src/oceens/main.py`) |
+
+### Settings and secrets
+
+They live in the GitHub Environment `staging`, never in a committed file, and every deploy
+writes them to the app.
+
+| Kind | Name | What it is |
+|---|---|---|
+| Variable | `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID` | The identity the workflow logs in to Azure as, through OpenID Connect. No Azure password is stored. |
+| Variable | `AZURE_RESOURCE_GROUP`, `AZURE_WEBAPP_NAME` | The app the environment deploys to. |
+| Secret | `DEV_LOGIN_KEY` | Opens the dev sign-in. The environment's own. |
+| Secret | `SECRET_KEY` | Signs the session cookie. The environment's own: without it, each deploy and restart signs everyone out. |
+| Secret | `MISTRAL_API_KEY` | The key of the LLM. |
+
+The deploy refuses to start if one of them is empty. It also writes, with the same value
+on every deploy: `AUTH_MODE=dev`, `RUN_SUMMARIES_DAEMON=1`, `WEBSITES_PORT=8000`,
+`WEBSITES_ENABLE_APP_SERVICE_STORAGE=false`, and the LLM row the seed creates:
+`DEFAULT_PROVIDER_API_TYPE=openai`, `DEFAULT_PROVIDER_BASE_URL=https://api.mistral.ai/v1`,
+`DEFAULT_PROVIDER_MODEL=ministral-14b-latest` and
+`DEFAULT_PROVIDER_KEY_ENV=MISTRAL_API_KEY`. The row keeps its seeded name, "Ollama EPF":
+test it in `/backend/providers` after a deploy.
+
+### Known limits
+
+- **The data is reset at every deploy and at every restart the platform makes.** The
+  SQLite file lives on the container's own disk, not on App Service's lasting storage,
+  `/home`, which is a network share. Each start creates the tables and seeds the demo
+  dataset again, so everything written since the last start is lost, and so is every
+  change made to the LLM row in the admin.
+- **One Mistral quota.** A laptop whose `.env` holds the same Mistral key spends the same
+  rate limit and quota as the deployed app: a local run that sends many requests can make
+  Mistral answer `429` to the deployed app's calls.
+
+---
+
 ## Validating a change
 
-The automated tests are still few (`uv run pytest`), and CI covers the architecture rules
-only (`.github/workflows/architecture.yml`, on every push and pull request), so behaviour
-is mostly on you: before proposing a change, run the tests, then the
+The automated tests are still few (`uv run pytest`). CI runs them and the architecture
+rules (`.github/workflows/architecture.yml`, on every push and pull request), so behaviour
+is still mostly on you: before proposing a change, run the tests, then the
 manual procedure in **[docs/smoke-test.md](docs/smoke-test.md)**: static checks, startup
 from a fresh clone, Docker, exit codes on invalid configuration, and the LLM key. Then
 test the routes your change touches, on a throwaway SQLite database (never a copy of

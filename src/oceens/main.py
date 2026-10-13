@@ -58,6 +58,10 @@ STATIC_DIR = Path(__file__).resolve().parent / "static"
 # Valeurs de RUN_SUMMARIES_DAEMON interprétées comme "activé"
 _TRUTHY = {"1", "true", "yes", "on"}
 
+# Le commit dont l'image a été construite (Dockerfile, `ARG REVISION`). Hors
+# d'une image, "unknown".
+REVISION = os.environ.get("REVISION", "").strip() or "unknown"
+
 
 def _maybe_start_summaries_daemon():
     """Lance le daemon de synthèses en process séparé si demandé par l'env.
@@ -172,6 +176,18 @@ def create_app():
 
         if response.status_code == 404 and request.url.path != "/":
             return RedirectResponse(url="/", status_code=303)
+        return response
+
+    @app.middleware("http")
+    async def send_revision(request: Request, call_next):
+        """Dit sur chaque réponse de quel commit l'image a été construite.
+
+        Défini après `redirect_errors`, donc autour de lui : l'en-tête est
+        aussi sur ses redirections. Un déploiement le lit pour savoir quelle
+        image répond, et non seulement qu'une image répond.
+        """
+        response = await call_next(request)
+        response.headers["X-Revision"] = REVISION
         return response
 
     # Routeur d'authentification (login/logout/callback Azure Entra ID)
